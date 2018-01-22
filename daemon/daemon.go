@@ -968,7 +968,6 @@ func NewDaemon(c *Config) (*Daemon, error) {
 	// CPUs.
 	d.StartEndpointBuilders(numWorkerThreads())
 
-
 	if k8s.IsEnabled() {
 		if err := k8s.Init(); err != nil {
 			log.WithError(err).Fatal("Unable to initialize Kubernetes subsystem")
@@ -992,9 +991,6 @@ func NewDaemon(c *Config) (*Daemon, error) {
 		// TODO (ianvernon) - ip address space for other runtimes - i.e., with Docker, Mesos?
 		d.conf.AddressSpace = "default"
 	}
-
-
-
 
 	// If the device has been specified, the IPv4AllocPrefix and the
 	// IPv6AllocPrefix were already allocated before the k8s.Init().

@@ -595,7 +595,7 @@ func (h *getEndpointIDHealthz) Handle(params GetEndpointIDHealthzParams) middlew
 	}
 }
 
-// UpdateSecLabels add and deletes the given labels on given endpoint ID.
+// UpdateSecLabels adds and deletes the given labels on given endpoint ID.
 // The received `add` and `del` labels will be filtered with the valid label
 // prefixes.
 // The `add` labels take precedence over `del` labels, this means if the same
@@ -620,6 +620,8 @@ func (d *Daemon) UpdateSecLabels(id string, add, del labels.Labels) middleware.R
 	// This is safe only if no other goroutine may change the labels in parallel
 	ep.Mutex.RLock()
 	oldLabels := ep.OpLabels.DeepCopy()
+	epIPv4 := ep.IPv4
+	epIPv6 := ep.IPv6
 	ep.Mutex.RUnlock()
 
 	if len(delLabels) > 0 {
@@ -662,9 +664,9 @@ func (d *Daemon) UpdateSecLabels(id string, add, del labels.Labels) middleware.R
 		}
 	}
 
-	identity, newHash, err2 := d.updateEndpointIdentity(ep.StringID(), ep.LabelsHash, oldLabels)
-	if err2 != nil {
-		return apierror.Error(PutEndpointIDLabelsUpdateFailedCode, err2)
+	identity, newHash, err := d.updateEndpointIdentity(ep.StringID(), ep.LabelsHash, oldLabels)
+	if err != nil {
+		return apierror.Error(PutEndpointIDLabelsUpdateFailedCode, err)
 	}
 
 	ep.Mutex.Lock()
@@ -676,7 +678,14 @@ func (d *Daemon) UpdateSecLabels(id string, add, del labels.Labels) middleware.R
 				logfields.Identity:   identity.ID,
 			}).WithError(err).Warn("Unable to release temporary identity")
 		}
+
+		// TODO (ianvernon) delete endpoint IP --> security identity mapping here
 		return NewPutEndpointIDLabelsNotFound()
+	}
+
+	err = d.updateKVStoreEpIPLabelsMapping(epIPv4, epIPv6, identity)
+	if err != nil {
+		return apierror.Error(PutEndpointIDLabelsUpdateFailedCode, err)
 	}
 
 	ep.LabelsHash = newHash
@@ -693,6 +702,26 @@ func (d *Daemon) UpdateSecLabels(id string, add, del labels.Labels) middleware.R
 	}
 
 	return nil
+}
+
+func (d *Daemon) updateKVStoreEpIPLabelsMapping(epIPv4, epIPv6 []byte, identity *policy.Identity) error {
+	var err error
+	//var kvStoreIdentity policy.NumericIdentity
+
+	// TODO - stub. Update key-value store mapping
+
+	// COPY AND PASTED
+	// Get numeric identity.
+	//idNum := identity.ID
+
+	// See if this identity for these IPs is the same as the one in the key-value store.
+	err = d.CreateOrUpdateEndpointIPIdentityMapping(epIPv4, epIPv6, identity)
+	if err != nil {
+		return fmt.Errorf("unable to retrieve endpoint IP to identity mapping %s", err)
+	}
+
+	return nil
+
 }
 
 type putEndpointIDLabels struct {
@@ -744,6 +773,11 @@ func (d *Daemon) EndpointLabelsUpdate(ep *endpoint.Endpoint, identityLabels, inf
 	identity, newHash, err := d.updateEndpointIdentity(ep.StringID(), ep.LabelsHash, &ep.OpLabels)
 	if err != nil {
 		return fmt.Errorf("Unable to update identity of endpoint")
+	}
+
+	err = d.updateKVStoreEpIPLabelsMapping(ep.IPv4, ep.IPv6, identity)
+	if err != nil {
+		return err
 	}
 
 	// Set identity labels and identity associating while holding endpoint
