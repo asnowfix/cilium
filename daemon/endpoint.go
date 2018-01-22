@@ -353,6 +353,13 @@ func (d *Daemon) deleteEndpoint(ep *endpoint.Endpoint) int {
 		}).Error("Error while deleting labels")
 	}
 
+	if err := d.DeleteEndpointIPIdentityMapping(ep.IPv4, ep.IPv6); err != nil {
+		log.WithError(err).WithFields(logrus.Fields{
+			logfields.EndpointID: ep.ID,
+			"epIPV4":             ep.IPv4,
+			"epIPv6":             ep.IPv6}).Error("Error removing endpoint IP --> identity mapping from key-value store")
+	}
+
 	// Remove the endpoint before we clean up. This ensures it is no longer
 	// listed or queued for rebuilds.
 	endpointmanager.Remove(ep)
@@ -669,6 +676,17 @@ func (d *Daemon) UpdateSecLabels(id string, add, del labels.Labels) middleware.R
 		return apierror.Error(PutEndpointIDLabelsUpdateFailedCode, err)
 	}
 
+	if newHash != ep.LabelsHash {
+		if err := d.DeleteEndpointIPIdentityMapping(ep.IPv4, ep.IPv6); err != nil {
+			return apierror.Error(PutEndpointIDLabelsUpdateFailedCode, err)
+		}
+	}
+
+	err = d.updateKVStoreEpIPLabelsMapping(epIPv4, epIPv6, identity)
+	if err != nil {
+		return apierror.Error(PutEndpointIDLabelsUpdateFailedCode, err)
+	}
+
 	ep.Mutex.Lock()
 	if ep.GetStateLocked() == endpoint.StateDisconnected {
 		ep.Mutex.Unlock()
@@ -681,11 +699,6 @@ func (d *Daemon) UpdateSecLabels(id string, add, del labels.Labels) middleware.R
 
 		// TODO (ianvernon) delete endpoint IP --> security identity mapping here
 		return NewPutEndpointIDLabelsNotFound()
-	}
-
-	err = d.updateKVStoreEpIPLabelsMapping(epIPv4, epIPv6, identity)
-	if err != nil {
-		return apierror.Error(PutEndpointIDLabelsUpdateFailedCode, err)
 	}
 
 	ep.LabelsHash = newHash
@@ -715,7 +728,7 @@ func (d *Daemon) updateKVStoreEpIPLabelsMapping(epIPv4, epIPv6 []byte, identity 
 	//idNum := identity.ID
 
 	// See if this identity for these IPs is the same as the one in the key-value store.
-	err = d.CreateOrUpdateEndpointIPIdentityMapping(epIPv4, epIPv6, identity)
+	err = d.CreateOrUpdateEndpointIPIdentityMapping(epIPv4, epIPv6, identity.ID)
 	if err != nil {
 		return fmt.Errorf("unable to retrieve endpoint IP to identity mapping %s", err)
 	}
@@ -775,6 +788,13 @@ func (d *Daemon) EndpointLabelsUpdate(ep *endpoint.Endpoint, identityLabels, inf
 		return fmt.Errorf("Unable to update identity of endpoint")
 	}
 
+	// TODO - can we pass the endpoint itself into updateEndpointIdentity? we can lock it when accessing its structs and then unlock it.
+	if newHash != ep.LabelsHash {
+		if err := d.DeleteEndpointIPIdentityMapping(ep.IPv4, ep.IPv6); err != nil {
+			return apierror.Error(PutEndpointIDLabelsUpdateFailedCode, err)
+		}
+	}
+
 	err = d.updateKVStoreEpIPLabelsMapping(ep.IPv4, ep.IPv6, identity)
 	if err != nil {
 		return err
@@ -794,6 +814,7 @@ func (d *Daemon) EndpointLabelsUpdate(ep *endpoint.Endpoint, identityLabels, inf
 				logfields.EndpointID: ep.StringID(),
 				logfields.Identity:   identity.ID,
 			}).WithError(err).Warn("Unable to release temporary identity")
+
 		}
 
 		return fmt.Errorf("Endpoint is disconnected, aborting label update handler")
