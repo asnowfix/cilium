@@ -695,6 +695,8 @@ func runDaemon() {
 
 	d.EnableLabelsKVStoreWatcher(30 * time.Second)
 
+	d.EnableEndpointIdentityKVStoreWatcher(30 * time.Second)
+
 	if err := d.EnableK8sWatcher(5 * time.Minute); err != nil {
 		log.WithError(err).Warn("Error while enabling k8s watcher")
 	}

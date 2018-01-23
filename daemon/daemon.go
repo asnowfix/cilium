@@ -101,6 +101,8 @@ type Daemon struct {
 	maxCachedLabelIDMU lock.RWMutex
 	maxCachedLabelID   policy.NumericIdentity
 
+	ipIdentityCache map[string]policy.NumericIdentity
+
 	uniqueIDMU lock.Mutex
 	uniqueID   map[uint64]bool
 
@@ -943,10 +945,11 @@ func NewDaemon(c *Config) (*Daemon, error) {
 	lb := types.NewLoadBalancer()
 
 	d := Daemon{
-		conf:         c,
-		loadBalancer: lb,
-		policy:       policy.NewPolicyRepository(),
-		uniqueID:     map[uint64]bool{},
+		conf:            c,
+		loadBalancer:    lb,
+		policy:          policy.NewPolicyRepository(),
+		uniqueID:        map[uint64]bool{},
+		ipIdentityCache: map[string]policy.NumericIdentity{},
 
 		// FIXME
 		// The channel size has to be set to the maximum number of
