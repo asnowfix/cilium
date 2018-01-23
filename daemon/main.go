@@ -751,6 +751,9 @@ func runDaemon() {
 	// /endpoint/{id}/healthz
 	api.EndpointGetEndpointIDHealthzHandler = NewGetEndpointIDHealthzHandler(d)
 
+	// TODO (ianvernon)
+	api.EndpointGetEndpointIpsHandler = NewGetEndpointIpsIdentityHandler(d)
+
 	// /identity/
 	api.PolicyGetIdentityHandler = NewGetIdentityHandler(d)
 	api.PolicyGetIdentityIDHandler = NewGetIdentityIDHandler(d)
