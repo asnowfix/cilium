@@ -36,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpointmanager"
+	"github.com/cilium/cilium/pkg/envoy"
 	"github.com/cilium/cilium/pkg/flowdebug"
 	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/kvstore"
@@ -499,6 +500,8 @@ func initEnv(cmd *cobra.Command) {
 	log.Info("|  _| | | | | |     |")
 	log.Info("|___|_|_|_|___|_|_|_|")
 	log.Infof("Cilium %s", version.Version)
+
+	envoy.LogEnvoyVersion()
 
 	if viper.GetBool("pprof") {
 		pprof.Enable()
