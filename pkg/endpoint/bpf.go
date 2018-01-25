@@ -371,25 +371,29 @@ func (ep *epInfoCache) GetBPFValue() (*lxcmap.EndpointInfo, error) {
 	return ep.value, nil
 }
 
-// updateCT update the CT by flushing it completely for the given endpoint or by removing the entries that have
-// the list of consumers to remove.
-func (e *Endpoint) updateCT(owner Owner, flushEndpointCT bool, consumersAdd, consumersToRm policy.RuleContexts) *sync.WaitGroup {
+// updateCT updates the Connection Tracking based on the endpoint's policy
+// enforcement. If the policy enforcement is true, all CT entries will be
+// removed except the ones matched by idsToKeep. If the policy enforcement
+// is not being enforced then all CT entries that match idsToMod will be
+// modified.
+// It returns a sync.WaitGroup that will signalize when the CT entry table
+// is updated.
+func updateCT(owner Owner, e *Endpoint, epIPs []net.IP,
+	isPolicyEnforced, isLocal bool,
+	idsToKeep, idsToMod policy.SecurityIDContexts) *sync.WaitGroup {
+
 	wg := &sync.WaitGroup{}
 
-	isLocal := e.Opts.IsEnabled(OptionConntrackLocal)
-	ip4 := e.IPv4.IP()
-	ip6 := e.IPv6.IP()
-
-	if flushEndpointCT {
+	if isPolicyEnforced {
 		wg.Add(1)
 		go func(wg *sync.WaitGroup) {
-			owner.FlushCTEntries(e, isLocal, []net.IP{ip4, ip6}, consumersAdd)
+			owner.FlushCTEntries(e, isLocal, epIPs, idsToKeep)
 			wg.Done()
 		}(wg)
-	} else if len(consumersToRm) != 0 {
+	} else {
 		wg.Add(1)
 		go func(wg *sync.WaitGroup) {
-			owner.CleanCTEntries(e, isLocal, []net.IP{ip4, ip6}, consumersToRm)
+			owner.ModifyCTEntries(e, isLocal, epIPs, idsToMod)
 			wg.Done()
 		}(wg)
 	}
@@ -470,7 +474,7 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir, reason string) (uint64, err
 		// Regenerate policy and apply any options resulting in the
 		// policy change.
 		// Note that e.PolicyMap is not initialized!
-		if _, _, _, _, err = e.regeneratePolicy(owner, nil); err != nil {
+		if _, _, _, err = e.regeneratePolicy(owner, nil); err != nil {
 			e.Mutex.Unlock()
 			return 0, fmt.Errorf("Unable to regenerate policy: %s", err)
 		}
@@ -538,6 +542,10 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir, reason string) (uint64, err
 		}
 	}
 
+	var (
+		consumersAdd, consumersRm policy.SecurityIDContexts
+		policyChanged             bool
+	)
 	// Only generate & populate policy map if a seclabel and consumer model is set up
 	if c != nil {
 		c.AddMap(e.PolicyMap)
@@ -545,19 +553,50 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir, reason string) (uint64, err
 		// Regenerate policy and apply any options resulting in the
 		// policy change.
 		// This also populates e.PolicyMap
-		var (
-			consumersToRm, consumersAdd policy.RuleContexts
-			flushEndpointCT             bool
-		)
-		_, flushEndpointCT, consumersAdd, consumersToRm, err = e.regeneratePolicy(owner, nil)
+		policyChanged, consumersAdd, consumersRm, err = e.regeneratePolicy(owner, nil)
 		if err != nil {
 			e.Mutex.Unlock()
-			err = fmt.Errorf("Unable to regenerate policy for '%s': %s",
-				e.PolicyMap.String(), err)
-			return 0, err
+			return 0, fmt.Errorf("Unable to regenerate policy for '%s': %s", e.PolicyMap.String(), err)
 		}
-		wg := e.updateCT(owner, flushEndpointCT, consumersAdd, consumersToRm)
-		defer wg.Wait()
+		// policyChanged can still be true and, at the same time,
+		// the consumersAdd be nil. If this happens it means
+		// the L4-L7 was changed so we need to update the
+		// L3L4Policy map with the new proxyport.
+		if policyChanged &&
+			consumersAdd == nil &&
+			c.L4Policy != nil &&
+			c.L4Policy.Ingress != nil &&
+			c.L3L4Policy != nil {
+
+			// Only update CT if the new a L7RedirectPort was changed.
+			policyChanged = false
+
+			newSecIDCtxs := policy.NewSecurityIDContexts()
+			p := *c.L3L4Policy
+			for identity, ruleContexts := range p {
+				for ruleContext, v := range ruleContexts {
+					// For all existing L3L4Policies, check if
+					// the same Port/Proto exists in the current c.L4Policy.
+					l4Filter, ok := c.L4Policy.Ingress[ruleContext.PortProto()]
+					l7Host := byteorder.HostToNetwork(uint16(l4Filter.L7RedirectPort)).(uint16)
+					if ok && ruleContext.L7RedirectPort != l7Host {
+						ruleContext.L7RedirectPort = l7Host
+						if _, ok := newSecIDCtxs[identity]; !ok {
+							newSecIDCtxs[identity] = policy.NewRuleContexts()
+						}
+						newSecIDCtxs[identity][ruleContext] = v
+						policyChanged = true
+					}
+				}
+			}
+
+			if policyChanged {
+				for ni, ruleContexts := range newSecIDCtxs {
+					p[ni] = ruleContexts
+				}
+				consumersAdd = c.L3L4Policy.DeepCopy()
+			}
+		}
 	}
 
 	epInfoCache := e.createEpInfoCache()
@@ -598,6 +637,14 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir, reason string) (uint64, err
 			e.L3Maps.DestroyBpfMap(IPv4Egress, e.IPv4EgressMapPathLocked())
 		}
 	}
+
+	// Since the endpoint's lock will be unlocked, we need to
+	// store the current endpoint state so we can later on
+	// update the CT without requiring to lock the endpoint again.
+	isPolicyEnforced := e.IngressOrEgressIsEnforced()
+	isLocal := e.Opts.IsEnabled(OptionConntrackLocal)
+	epIPs := []net.IP{e.IPv4.IP(), e.IPv6.IP()}
+
 	e.Mutex.Unlock()
 
 	libdir := owner.GetBpfDir()
@@ -605,13 +652,20 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir, reason string) (uint64, err
 	debug := strconv.FormatBool(owner.DebugEnabled())
 
 	err = e.runInit(libdir, rundir, epdir, epInfoCache.ifName, debug)
-	if err == nil {
-		// The last operation hooks the endpoint into the endpoint table and exposes it
-		err = lxcmap.WriteEndpoint(epInfoCache)
-		if err != nil {
-			log.WithField(logfields.EndpointID, e.ID).WithError(err).Error("Exposing new bpf failed!")
-		}
+	if err != nil {
+		return epInfoCache.revision, err
+	}
+	// REVIEW: should the CT entry clean up also happen
+	// even if the bpf program build has failed? I think we should.
+	if policyChanged {
+		wg := updateCT(owner, e, epIPs, isPolicyEnforced, isLocal, consumersAdd, consumersRm)
+		defer wg.Wait()
 	}
 
+	// The last operation hooks the endpoint into the endpoint table and exposes it
+	err = lxcmap.WriteEndpoint(epInfoCache)
+	if err != nil {
+		log.WithField(logfields.EndpointID, e.ID).WithError(err).Error("Exposing new bpf failed!")
+	}
 	return epInfoCache.revision, err
 }

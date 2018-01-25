@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Authors of Cilium
+// Copyright 2016-2018 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
+	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/u8proto"
 )
 
 const (
@@ -63,13 +65,47 @@ func (id NumericIdentity) Uint32() uint32 {
 	return uint32(id)
 }
 
+// SecurityIDContexts maps a security identity to a RuleContexts
+type SecurityIDContexts map[NumericIdentity]RuleContexts
+
+func (sc SecurityIDContexts) DeepCopy() SecurityIDContexts {
+	cpy := make(SecurityIDContexts)
+	for k, v := range sc {
+		cpy[k] = v.DeepCopy()
+	}
+	return cpy
+}
+
+// SecurityIDContexts returns a new RuleContexts created.
+func NewSecurityIDContexts() SecurityIDContexts {
+	return SecurityIDContexts(make(map[NumericIdentity]RuleContexts))
+}
+
+// RuleContexts maps a rule context to a boolean.
 type RuleContexts map[RuleContext]bool
 
-// RuleContext represents a L3-dependent L4 rule
+// NewRuleContexts returns a new RuleContexts created.
+func NewRuleContexts() RuleContexts {
+	return RuleContexts(make(map[RuleContext]bool))
+}
+
+func (rc RuleContexts) DeepCopy() RuleContexts {
+	cpy := make(RuleContexts)
+	for k, v := range rc {
+		cpy[k] = v
+	}
+	return cpy
+}
+
+// IsL3Only returns false if the given RuleContexts contains any entry. If it
+// does not contain any entry it is considered a L3 only rule.
+func (rc RuleContexts) IsL3Only() bool {
+	return rc != nil && len(rc) == 0
+}
+
+// RuleContext represents a L4 rule
 // Don't use pointers here since this structure is used as key on maps.
 type RuleContext struct {
-	// SecID is the security ID for the numeric identity
-	SecID NumericIdentity
 	// Port is the destination port in the policy in network byte order
 	Port uint16
 	// Proto is the protocol ID used
@@ -78,6 +114,20 @@ type RuleContext struct {
 	L7RedirectPort uint16
 	// IsRedirect is set in case the rule is a redirect
 	IsRedirect bool
+}
+
+func (rc RuleContext) PortProto() string {
+	p := u8proto.U8proto(rc.Proto).String()
+	return strconv.Itoa(int(byteorder.HostToNetwork(uint16(rc.Port)).(uint16))) + "/" + p
+}
+
+func ParseL4Filter(filter L4Filter) RuleContext {
+	return RuleContext{
+		Port:           byteorder.HostToNetwork(uint16(filter.Port)).(uint16),
+		Proto:          uint8(filter.U8Proto),
+		L7RedirectPort: byteorder.HostToNetwork(uint16(filter.L7RedirectPort)).(uint16),
+		IsRedirect:     filter.IsRedirect(),
+	}
 }
 
 // Identity is the representation of the security context for a particular set of
