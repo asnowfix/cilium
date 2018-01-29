@@ -3,6 +3,14 @@
 
 Vagrant.require_version ">= 1.8.3"
 
+url_proxy = ENV['http_proxy']
+use_proxy = false
+use_proxy = true if ! url_proxy.empty?
+if use_proxy
+    # no_proxy for non-routable networks by default
+    not_proxy = ENV['no_proxy'] || 'localhost,127.0.0.1,10.0.0.0/8,192.168.0.0/16'
+end
+
 num_nodes = (ENV['NNODES'] || 1).to_i
 cilium_version = (ENV['CILIUM_VERSION'] || "v1.0.0-rc3")
 cilium_opts = (ENV['CILIUM_OPTS'] || "--kvstore consul --kvstore-opt consul.address 192.168.33.11:8500 -t vxlan")
@@ -37,6 +45,31 @@ SCRIPT
 
 Vagrant.configure(2) do |config|
     config.vm.box = "bento/ubuntu-17.04"
+    if use_proxy
+        puts "Using HTTP proxy '#{url_proxy}'..."
+        if Vagrant.has_plugin?('vagrant-proxyconf')
+            # http://tmatilai.github.io/vagrant-proxyconf/
+            config.proxy.http     = url_proxy
+            config.proxy.https    = url_proxy
+            config.proxy.no_proxy = not_proxy
+            config.apt_proxy.http = url_proxy
+            config.apt_proxy.https = url_proxy
+        else
+            puts '*** Could not find vagrant-proxyconf plugin (required to work behind a proxy).'
+            puts '*** Run `$ vagrant plugin install vagrant-proxyconf`'
+            exit 1
+        end
+    else
+        puts "INFO: no HTTP proxy needed"
+    end
+
+    config.vm.provider "virtualbox" do |v|
+        if Vagrant.has_plugin?('vagrant-vbguest')
+            # do not try to fetch any remote resource
+            config.vbguest.auto_update = false
+            config.vbguest.no_remote = true
+        end
+    end
 
     # http://foo-o-rama.com/vagrant--stdin-is-not-a-tty--fix.html
     config.vm.provision "fix-no-tty", type: "shell" do |s|
@@ -50,6 +83,13 @@ Vagrant.configure(2) do |config|
         # Do not inherit DNS server from host, use proxy
         vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
         vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+    end
+
+    # https://github.com/tmatilai/vagrant-proxyconf/issues/155
+    config.vm.provision "docker" do |d|
+    end
+    config.vm.provision "docker" do |d|
+      d.run "hello-world"
     end
 
     # install docker runtime
